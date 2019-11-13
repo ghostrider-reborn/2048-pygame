@@ -6,7 +6,7 @@
     CBSE Computer Science project by:
         Adithya R (@ghostrider-reborn)
         Mohan S (@Autobahn1racer)
-        Vansh U
+        Vansh U (@SE7ENXI)
         ~ Class XII A, 2019-20, FIS
 """
 
@@ -24,7 +24,7 @@ except ImportError:
 # Q: why psutil? why not os.kill() ?
 # A: cuz it's cross-platform i.e. works in windows and linux,
 #    and it can be used to terminate child processes too
-try: from psutil import Process
+try: import psutil
 except ImportError:
     print("\n'psutil' module is not installed. Install it using pip")
     sys.exit()
@@ -32,7 +32,7 @@ except ImportError:
 # import django stuff
 try: from django.conf import settings
 except ImportError:
-    print("\nDjango ain't installed you noob! Install it first using pip")
+    print("\nDjango is not installed! Install it using pip")
     sys.exit()
 
 # configure django
@@ -230,6 +230,31 @@ class Board:
                             self.blocks.remove(block[0])
                     next_idx += 1
 
+    def is_mergeable(self):
+        ''' Checks if any blocks are available to be merged '''
+        mergeable = False
+
+        for direction in (Direction.Up, Direction.Down, Direction.Left, Direction.Right):
+            if mergeable: break
+            for line_col_idx in range(SLIDE_SWITCHER[direction][5]):
+                current_blocks = [(block, getattr(block, SLIDE_SWITCHER[direction][4]))
+                                  for block in self.blocks
+                                  if getattr(block, SLIDE_SWITCHER[direction][3]) == line_col_idx]
+                if len(current_blocks) <= 1: continue
+                else:
+                    # merge: (idx_move_start -> idx_boundary] by idx_step
+                    current_blocks.sort(key=lambda row: row[1], reverse=False
+                                        if (SLIDE_SWITCHER[direction][2] == -1) else True)
+                    next_idx = 1
+                    for block in current_blocks:
+                        if next_idx >= len(current_blocks): break
+                        else:
+                            if getattr(block[0], 'score') == getattr(current_blocks[next_idx][0], 'score'):
+                                mergeable = True
+                        next_idx += 1
+
+        return mergeable
+
     def generate_block(self):
         ''' Generates a random block and inserts it anywhere on the board '''
         if len(self.blocks) >= (BOARD_WIDTH * BOARD_HEIGHT): return
@@ -246,6 +271,8 @@ class Board:
         self.handle_block_slide(direction)
         self.slide_block()
         self.merge_block(direction)
+        self.handle_block_slide(direction)
+        self.slide_block()
         self.generate_block()
 
     # used from main() to fetch the current score and number of blocks
@@ -281,7 +308,7 @@ def mainmenu():
         # the play button - when clicked, opens the login page and redirects
         # back to the game window when the user has logged in or registered
         if draw_button('Play', "Green", BUTTON_FONT_SIZE, 200):
-            openLoginPage()
+            if not openLoginPage(): mainmenu()
             return
         # the quit button
         elif draw_button('Quit', "Red", BUTTON_FONT_SIZE, 410): quit()
@@ -299,6 +326,7 @@ def game():
            MUTE_OBJ, UNMUTE_OBJ, BACK_OBJ, muted, current_score
 
     # initialize the pygame window
+    print("\nPlease wait, the game is loading...")
     pygame.init()
     FPS_CLOCK = pygame.time.Clock()
     WINDOW = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
@@ -330,8 +358,8 @@ def game():
     # Main game loop
     while True:
         # for debugging/testing:
-        #handle_win_or_lost(Result.Win)
-        #handle_win_or_lost(Result.Lost)
+        #handle_win_lose(Result.Win)
+        #handle_win_lose(Result.Lost)
 
         # render the background and backbutton
         WINDOW.blit(BG_OBJ, (0, 0))
@@ -366,10 +394,10 @@ def game():
         current_score = main_board.get_max_score()
         draw_blocks(main_board)
 
-        if len(main_board.blocks) >= (BOARD_WIDTH * BOARD_HEIGHT):
-            # blocks have filled the screen -> the user lost
+        if len(main_board.blocks) == (BOARD_WIDTH * BOARD_HEIGHT) and not main_board.is_mergeable():
+            # blocks have filled the screen and no blocks are mergeable -> the user lost
             pygame.time.wait(1000)
-            handle_win_or_lost(Result.Lost)
+            handle_win_lose(Result.Lost)
             main_board = Board()
         elif current_score < 2048:
             # the user is still playing, update the score
@@ -378,7 +406,7 @@ def game():
         else:
             # the user won!
             pygame.time.wait(1000)
-            handle_win_or_lost(Result.Win)
+            handle_win_lose(Result.Win)
             main_board = Board()
 
         pygame.display.update()
@@ -386,7 +414,7 @@ def game():
 
 def quit():
     ''' Neatly logout, wrap up everything and quit the game '''
-    global server
+    global server, browser
 
     # exit pygame
     pygame.quit()
@@ -401,12 +429,15 @@ def quit():
         browser = openBrowser()
         browser.get('http://localhost:8000/logout')
         time.sleep(2)
-        browser.close()
+
+    # always make sure we kill all webdriver processes before exiting
+    try: browser.quit()
+    except: pass
 
     # kill the django server
-    for proc in Process(server.pid).children(recursive=True): proc.kill()
+    for proc in psutil.Process(server.pid).children(recursive=True): proc.kill()
     server.terminate()
-    exit()
+    sys.exit()
 
 def openBrowser():
     ''' Opens a selenium webdriver browser window and returns the
@@ -422,8 +453,14 @@ def openBrowser():
         chrome_exec += '.exe'
         firefox_exec += '.exe'
 
+    # try to open firefox
     try: browser = webdriver.Firefox(executable_path = firefox_exec)
     except:
+        # firefox doesnt exist, kill the zombie process
+        for proc in psutil.process_iter():
+            if 'geckodriver' in proc.name(): proc.kill()
+
+        # now try to open chrome
         try: browser = webdriver.Chrome(chrome_exec)
         except:
             print("Either firefox or chrome is required!")
@@ -445,15 +482,26 @@ def openLoginPage():
     if not os.path.isfile("website/authinfo.txt"):
         browser = openBrowser()
         browser.get('http://localhost:8000/login')
+        
         while not os.path.isfile("website/authinfo.txt"):
             print("User has not logged in yet! Waiting for 2 secs...")
+            # go back to the main menu if the player closed tbe browser
+            # without logging in
+            try: check = browser.window_handles
+            except:
+                print("\nYou can't play the game without logging in!")
+                browser.quit()
+                return False
             time.sleep(2)
+        
         time.sleep(1)
-        browser.close()
+        browser.quit()
 
     with open("website/authinfo.txt", "r") as authinfo:
         username = ((authinfo.readlines())[0].split())[0]
         print("\nLogged in as user:", username)
+
+    return True
 
 def updateLeaderboard(score):
     ''' Handles updating or adding score in leaderboard, using django models '''
@@ -510,7 +558,7 @@ def draw_title(title, y = False, color = TEXT_COLOR):
     else: text_rect_obj = text_surface_obj.get_rect(center = TITLE_CENTER)
     WINDOW.blit(text_surface_obj, text_rect_obj)
 
-def handle_win_or_lost(result):
+def handle_win_lose(result):
     ''' Win/lose screen '''
     global current_score
 
